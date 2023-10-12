@@ -26,15 +26,25 @@ const (
 
 	checkpointInterval = 1024 // Number of blocks after which to save the snapshot to the database
 
-	extraVanity = 32 // Fixed number of extra-data prefix bytes reserved for signer vanity
-	extraSeal   = 65 // Fixed number of extra-data suffix bytes reserved for signer seal
+	extraVanity      = 32 // Fixed number of extra-data prefix bytes reserved for signer vanity
+	extraSeal        = 65 // Fixed number of extra-data suffix bytes reserved for signer seal
+	nextForkHashSize = 4  // Fixed number of extra-data suffix bytes reserved for nextForkHash.
 
-	maxValidators        = 21 // Max validators allowed to seal.
-	validatorBytesLength = common.AddressLength
+	maxValidators = 21 // Max validators allowed to seal.
+
+	BLSPublicKeyLength = 48
+	BLSSignatureLength = 96
+
+	MaxAttestationExtraLength = 256
+
+	validatorBytesLength = common.AddressLength + BLSPublicKeyLength
+	validatorNumberSize  = 1 // Fixed number of extra prefix bytes reserved for validator number after Luban
 )
 
 var (
 	uncleHash  = types.CalcUncleHash(nil) // Always Keccak256(RLP([])) as uncles are meaningless outside of PoW.
+	diffInTurn = big.NewInt(2)            // Block difficulty for in-turn signatures
+	diffNoTurn = big.NewInt(1)            // Block difficulty for out-of-turn signatures
 	bscChainid = big.NewInt(56)
 )
 

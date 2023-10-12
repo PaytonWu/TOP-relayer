@@ -3,8 +3,6 @@ module toprelayer
 go 1.19
 
 require (
-	github.com/deckarep/golang-set v1.8.0
-	github.com/edsrzf/mmap-go v1.1.0
 	github.com/ethereum/go-ethereum v1.11.3
 	github.com/hashicorp/golang-lru v0.5.5-0.20210104140557-80c98217689d
 	github.com/pkg/errors v0.9.1
@@ -45,7 +43,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.0.1 // indirect
 	github.com/herumi/bls-eth-go-binary v0.0.0-20210917013441-d37c07cfda4e // indirect
 	github.com/holiman/bloomfilter/v2 v2.0.3 // indirect
-	github.com/holiman/uint256 v1.2.1 // indirect
 	github.com/klauspost/compress v1.15.15 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
