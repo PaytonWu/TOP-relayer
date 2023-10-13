@@ -21,6 +21,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"math/big"
 	"sort"
 
@@ -42,12 +45,17 @@ var (
 type Snapshot struct {
 	sigCache *lru.ARCCache // Cache of recent block signatures to speed up ecrecover
 
-	Number           uint64                      `json:"number"`     // Block number where the snapshot was created
-	Hash             common.Hash                 `json:"hash"`       // Block hash where the snapshot was created
-	Validators       map[common.Address]struct{} `json:"validators"` // Set of authorized validators at this moment
-	LastValidators   map[common.Address]struct{} `json:"last_validators"`
-	Recents          map[uint64]common.Address   `json:"recents"`            // Set of recent validators for spam protections
-	RecentForkHashes map[uint64]string           `json:"recent_fork_hashes"` // Set of recent forkHash
+	Number           uint64                            `json:"number"`                // Block number where the snapshot was created
+	Hash             common.Hash                       `json:"hash"`                  // Block hash where the snapshot was created
+	Validators       map[common.Address]*ValidatorInfo `json:"validators"`            // Set of authorized validators at this moment
+	Recents          map[uint64]common.Address         `json:"recents"`               // Set of recent validators for spam protections
+	RecentForkHashes map[uint64]string                 `json:"recent_fork_hashes"`    // Set of recent forkHash
+	Attestation      *VoteData                         `json:"attestation:omitempty"` // Attestation for fast finality, but `Source` used as `Finalized`
+}
+
+type ValidatorInfo struct {
+	Index       int          `json:"index:omitempty"` // The index should offset by 1
+	VoteAddress BLSPublicKey `json:"vote_address,omitempty"`
 }
 
 // newSnapshot creates a new snapshot with the specified startup parameters. This
@@ -59,6 +67,7 @@ func newSnapshot(
 	hash common.Hash,
 	lastValidators []common.Address,
 	validators []common.Address,
+	voteAddrs []BLSPublicKey,
 ) *Snapshot {
 	snap := &Snapshot{
 		sigCache:         sigCache,
@@ -66,14 +75,29 @@ func newSnapshot(
 		Hash:             hash,
 		Recents:          make(map[uint64]common.Address),
 		RecentForkHashes: make(map[uint64]string),
-		Validators:       make(map[common.Address]struct{}),
-		LastValidators:   make(map[common.Address]struct{}),
+		Validators:       make(map[common.Address]*ValidatorInfo),
+		//LastValidators:   make(map[common.Address]struct{}),
 	}
-	for _, v := range lastValidators {
-		snap.LastValidators[v] = struct{}{}
+	//for _, v := range lastValidators {
+	//	snap.LastValidators[v] = struct{}{}
+	//}
+	for idx, v := range validators {
+		// The luban fork from the genesis block
+		if len(voteAddrs) == len(validators) {
+			snap.Validators[v] = &ValidatorInfo{
+				VoteAddress: voteAddrs[idx],
+			}
+		} else {
+			snap.Validators[v] = &ValidatorInfo{}
+		}
 	}
-	for _, v := range validators {
-		snap.Validators[v] = struct{}{}
+
+	// The luban fork from the genesis block
+	if len(voteAddrs) == len(validators) {
+		validators := snap.validators()
+		for idx, v := range validators {
+			snap.Validators[v].Index = idx + 1 // offset by 1
+		}
 	}
 	return snap
 }
@@ -112,26 +136,37 @@ func (s *Snapshot) store(db ethdb.Database) error {
 // copy creates a deep copy of the snapshot
 func (s *Snapshot) copy() *Snapshot {
 	cpy := &Snapshot{
-		sigCache:         s.sigCache,
-		Number:           s.Number,
-		Hash:             s.Hash,
-		LastValidators:   make(map[common.Address]struct{}),
-		Validators:       make(map[common.Address]struct{}),
+		sigCache: s.sigCache,
+		Number:   s.Number,
+		Hash:     s.Hash,
+		// LastValidators:   make(map[common.Address]struct{}),
+		Validators:       make(map[common.Address]*ValidatorInfo),
 		Recents:          make(map[uint64]common.Address),
 		RecentForkHashes: make(map[uint64]string),
 	}
 
-	for v := range s.LastValidators {
-		cpy.LastValidators[v] = struct{}{}
-	}
+	//for v := range s.LastValidators {
+	//	cpy.LastValidators[v] = struct{}{}
+	//}
 	for v := range s.Validators {
-		cpy.Validators[v] = struct{}{}
+		cpy.Validators[v] = &ValidatorInfo{
+			Index:       s.Validators[v].Index,
+			VoteAddress: s.Validators[v].VoteAddress,
+		}
 	}
 	for block, v := range s.Recents {
 		cpy.Recents[block] = v
 	}
 	for block, id := range s.RecentForkHashes {
 		cpy.RecentForkHashes[block] = id
+	}
+	if s.Attestation != nil {
+		cpy.Attestation = &VoteData{
+			SourceNumber: s.Attestation.SourceNumber,
+			SourceHash:   s.Attestation.SourceHash,
+			TargetNumber: s.Attestation.TargetNumber,
+			TargetHash:   s.Attestation.TargetHash,
+		}
 	}
 	return cpy
 }
@@ -144,6 +179,48 @@ func (s *Snapshot) isMajorityFork(forkHash string) bool {
 		}
 	}
 	return ally > len(s.RecentForkHashes)/2
+}
+
+func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *params.ChainConfig, parliaConfig *params.ParliaConfig) {
+	if !chainConfig.IsLuban(header.Number) {
+		return
+	}
+
+	// The attestation should have been checked in verify header, update directly
+	attestation, _ := getVoteAttestationFromHeader(header, chainConfig, parliaConfig)
+	if attestation == nil {
+		return
+	}
+
+	// Headers with bad attestation are accepted before Plato upgrade,
+	// but Attestation of snapshot is only updated when the target block is direct parent of the header
+	targetNumber := attestation.Data.TargetNumber
+	targetHash := attestation.Data.TargetHash
+	if targetHash != header.ParentHash || targetNumber+1 != header.Number.Uint64() {
+		log.Warn("updateAttestation failed", "error", fmt.Errorf("invalid attestation, target mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
+			header.Number.Uint64()-1, header.ParentHash, targetNumber, targetHash))
+		updateAttestationErrorCounter.Inc(1)
+		return
+	}
+
+	// Update attestation
+	if s.Attestation != nil && attestation.Data.SourceNumber+1 != attestation.Data.TargetNumber {
+		s.Attestation.TargetNumber = attestation.Data.TargetNumber
+		s.Attestation.TargetHash = attestation.Data.TargetHash
+	} else {
+		s.Attestation = attestation.Data
+	}
+}
+
+func (s *Snapshot) SignRecently(validator common.Address) bool {
+	for seen, recent := range s.Recents {
+		if recent == validator {
+			if limit := uint64(len(s.Validators)/2 + 1); s.Number+1 < limit || seen > s.Number+1-limit {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Snapshot) apply(headers []*types.Header, chainId *big.Int) (*Snapshot, error) {
@@ -228,28 +305,32 @@ func (s *Snapshot) validators() []common.Address {
 	return validators
 }
 
-func ParseValidators(validatorsBytes []byte) ([]common.Address, error) {
-	if len(validatorsBytes)%validatorBytesLength != 0 {
-		return nil, errors.New("invalid validators bytes")
+func parseValidators(header *types.Header) ([]common.Address, []BLSPublicKey, error) {
+	validatorsBytes := getValidatorBytesFromHeader(header)
+	if len(validatorsBytes) == 0 {
+		return nil, nil, errors.New("invalid validators bytes")
 	}
+
+	// only works for Luban fork. so we don't check the Luban fork here
+
 	n := len(validatorsBytes) / validatorBytesLength
-	result := make([]common.Address, n)
+	cnsAddrs := make([]common.Address, n)
+	voteAddrs := make([]BLSPublicKey, n)
 	for i := 0; i < n; i++ {
-		address := make([]byte, validatorBytesLength)
-		copy(address, validatorsBytes[i*validatorBytesLength:(i+1)*validatorBytesLength])
-		result[i] = common.BytesToAddress(address)
+		cnsAddrs[i] = common.BytesToAddress(validatorsBytes[i*validatorBytesLength : i*validatorBytesLength+common.AddressLength])
+		copy(voteAddrs[i][:], validatorsBytes[i*validatorBytesLength+common.AddressLength:(i+1)*validatorBytesLength])
 	}
-	return result, nil
+	return cnsAddrs, voteAddrs, nil
 }
 
 type SnapshotOut struct {
-	Header        []byte
-	ValidatorsNum uint64
-	Validators    [][]byte
+	Header            []byte
+	ValidatorsNum     uint64
+	Validators        [][]byte
 	LastValidatorsNum uint64
 	LastValidators    [][]byte
-	RecentsNum    uint64
-	Recents       [][]byte
+	RecentsNum        uint64
+	Recents           [][]byte
 }
 
 func encodeSnapshot(header *types.Header, snap *Snapshot) ([]byte, error) {

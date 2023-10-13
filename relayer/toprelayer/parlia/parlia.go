@@ -137,44 +137,45 @@ func New(client *ethclient.Client) *Parlia {
 }
 
 func (c *Parlia) Init(height uint64) error {
-	var baseHeight uint64
+	var baseEpochHeight uint64
 	if height < Epoch {
-		baseHeight = 0
+		baseEpochHeight = 0
 	} else {
 		if height%Epoch >= ValidatorNum {
-			baseHeight = height / Epoch * Epoch
+			baseEpochHeight = height / Epoch * Epoch
 		} else {
-			baseHeight = (height/Epoch - 1) * Epoch
+			baseEpochHeight = (height/Epoch - 1) * Epoch
 		}
 	}
 
-	logger.Info("initing congress snapshot from %v to %v", baseHeight, height)
+	logger.Info("initialing congress snapshot from %v to %v", baseEpochHeight, height)
 	// init baseheight
 	{
-		lastcp, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseHeight-200))
+		preEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight-Epoch))
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
-		header, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseHeight))
+		baseEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight))
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
-		hash := header.Hash()
-		lastValidators := make([]common.Address, (len(lastcp.Extra)-extraVanity-extraSeal)/common.AddressLength)
+		hash := baseEpochHeader.Hash()
+		validatorBytes := getValidatorBytesFromHeader(baseEpochHeader)
+		lastValidators := make([]common.Address, (len(preEpochHeader.Extra)-extraVanity-extraSeal)/common.AddressLength)
 		for i := 0; i < len(lastValidators); i++ {
-			copy(lastValidators[i][:], lastcp.Extra[extraVanity+i*common.AddressLength:])
+			copy(lastValidators[i][:], preEpochHeader.Extra[extraVanity+i*common.AddressLength:])
 		}
-		validators := make([]common.Address, (len(header.Extra)-extraVanity-extraSeal)/common.AddressLength)
+		validators := make([]common.Address, (len(baseEpochHeader.Extra)-extraVanity-extraSeal)/common.AddressLength)
 		for i := 0; i < len(validators); i++ {
-			copy(validators[i][:], header.Extra[extraVanity+i*common.AddressLength:])
+			copy(validators[i][:], baseEpochHeader.Extra[extraVanity+i*common.AddressLength:])
 		}
-		snap := newSnapshot(c.signatures, baseHeight, hash, lastValidators, validators)
+		snap := newSnapshot(c.signatures, baseEpochHeight, hash, lastValidators, validators)
 		c.recentSnaps.Add(snap.Hash, snap)
 	}
 
-	for i := baseHeight + 1; i <= height; i++ {
+	for i := baseEpochHeight + 1; i <= height; i++ {
 		header, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(i))
 		if err != nil {
 			logger.Error(err)
@@ -293,6 +294,30 @@ func (p *Parlia) SealHash(header *types.Header) common.Hash {
 	return SealHash(header, bscChainid)
 }
 
+// getValidatorBytesFromHeader returns the validators bytes extracted from the header's extra field if exists.
+// The validators bytes would be contained only in the epoch block's header, and its each validator bytes length is fixed.
+// On luban fork, we introduce vote attestation into the header's extra field, so extra format is different from before.
+// Before luban fork: |---Extra Vanity---|---Validators Bytes (or Empty)---|---Extra Seal---|
+// After luban fork:  |---Extra Vanity---|---Validators Number and Validators Bytes (or Empty)---|---Vote Attestation (or Empty)---|---Extra Seal---|
+func getValidatorBytesFromHeader(header *types.Header) []byte {
+	if len(header.Extra) <= extraVanity+extraSeal {
+		return nil
+	}
+
+	// only supports Luban hard fork
+
+	if header.Number.Uint64()%Epoch != 0 {
+		return nil
+	}
+	num := int(header.Extra[extraVanity])
+	if num == 0 || len(header.Extra) <= extraVanity+extraSeal+num*validatorBytesLength {
+		return nil
+	}
+	start := extraVanity + validatorNumberSize
+	end := start + num*validatorBytesLength
+	return header.Extra[start:end]
+}
+
 // ===========================     utility function        ==========================
 // SealHash returns the hash of a block prior to it being sealed.
 func SealHash(header *types.Header, chainId *big.Int) (hash common.Hash) {
@@ -317,7 +342,7 @@ func encodeSigHeader(w io.Writer, header *types.Header, chainId *big.Int) {
 		header.GasLimit,
 		header.GasUsed,
 		header.Time,
-		header.Extra[:len(header.Extra)-65], // this will panic if extra is too short, should check before calling encodeSigHeader
+		header.Extra, // this will panic if extra is too short, should check before calling encodeSigHeader
 		header.MixDigest,
 		header.Nonce,
 	})
