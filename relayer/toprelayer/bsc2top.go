@@ -46,19 +46,19 @@ func (relayer *Bsc2TopRelayer) Init(cfg *config.Relayer, listenUrl []string, pas
 		return err
 	}
 
-	topethlient, err := ethclient.Dial(cfg.Url[0])
+	topEthClient, err := ethclient.Dial(cfg.Url[0])
 	if err != nil {
 		logger.Error("Bsc2TopRelayer new topethlient error:", err)
 		return err
 	}
-	relayer.transactor, err = ethbridge.NewEthClientTransactor(bscClientContract, topethlient)
+	relayer.transactor, err = ethbridge.NewEthClientTransactor(bscClientContract, topEthClient)
 	if err != nil {
 		logger.Error("Bsc2TopRelayer NewEthClientTransactor error:", err)
 		return err
 	}
 
 	relayer.callerSession = new(ethbridge.EthClientCallerSession)
-	relayer.callerSession.Contract, err = ethbridge.NewEthClientCaller(bscClientContract, topethlient)
+	relayer.callerSession.Contract, err = ethbridge.NewEthClientCaller(bscClientContract, topEthClient)
 	if err != nil {
 		logger.Error("Bsc2TopRelayer NewEthClientCaller error:", err)
 		return err
@@ -81,7 +81,7 @@ func (et *Bsc2TopRelayer) submitEthHeader(header []byte) error {
 		logger.Error("Bsc2TopRelayer NonceAt error:", err)
 		return err
 	}
-	gaspric, err := et.wallet.SuggestGasPrice(context.Background())
+	gasPrice, err := et.wallet.SuggestGasPrice(context.Background())
 	if err != nil {
 		logger.Error("Bsc2TopRelayer SuggestGasPrice error:", err)
 		return err
@@ -101,7 +101,7 @@ func (et *Bsc2TopRelayer) submitEthHeader(header []byte) error {
 		From:      et.wallet.Address(),
 		Nonce:     big.NewInt(0).SetUint64(nonce),
 		GasLimit:  gaslimit,
-		GasFeeCap: gaspric,
+		GasFeeCap: gasPrice,
 		GasTipCap: big.NewInt(0),
 		Signer:    et.signTransaction,
 		Context:   context.Background(),
@@ -113,11 +113,11 @@ func (et *Bsc2TopRelayer) submitEthHeader(header []byte) error {
 		return err
 	}
 
-	logger.Info("Bsc2TopRelayer tx info, account[%v] nonce:%v,capfee:%v,hash:%v,size:%v", et.wallet.Address(), nonce, gaspric, sigTx.Hash(), len(header))
+	logger.Info("Bsc2TopRelayer tx info, account[%v] nonce:%v,capfee:%v,hash:%v,size:%v", et.wallet.Address(), nonce, gasPrice, sigTx.Hash(), len(header))
 	return nil
 }
 
-//callback function to sign tx before send.
+// callback function to sign tx before send.
 func (et *Bsc2TopRelayer) signTransaction(addr common.Address, tx *types.Transaction) (*types.Transaction, error) {
 	acc := et.wallet.Address()
 	if strings.EqualFold(acc.Hex(), addr.Hex()) {
@@ -280,12 +280,12 @@ func (et *Bsc2TopRelayer) signAndSendTransactions(lo, hi uint64) error {
 			logger.Error(err)
 			break
 		}
-		rlp_bytes, err := et.parlia.GetLastSnapBytes(header)
+		rlpBytes, err := et.parlia.GetLastSnapBytes(header)
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
-		batch = append(batch, rlp_bytes...)
+		batch = append(batch, rlpBytes...)
 	}
 
 	// maybe verify block
@@ -311,8 +311,8 @@ func (et *Bsc2TopRelayer) GetInitData() ([]byte, error) {
 		logger.Error("Bsc2TopRelayer get height error:", err)
 		return nil, err
 	}
-	height := (destHeight - 11) / 200 * 200
-	logger.Error("heco init with height: %v - %v", height, height+11)
+	height := (destHeight - (parlia.ValidatorNum/2 + 1)) / parlia.Epoch * parlia.Epoch
+	logger.Error("BSC init with height: %v - %v", height, height+11)
 	var batch []byte
 	for i := height; i <= height+11; i++ {
 		header, err := et.ethsdk.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(i))
@@ -320,12 +320,12 @@ func (et *Bsc2TopRelayer) GetInitData() ([]byte, error) {
 			logger.Error("Bsc2TopRelayer HeaderByNumber error:", err)
 			return nil, err
 		}
-		rlp_bytes, err := rlp.EncodeToBytes(header)
+		rlpBytes, err := rlp.EncodeToBytes(header)
 		if err != nil {
 			logger.Error("Bsc2TopRelayer EncodeToBytes error:", err)
 			return nil, err
 		}
-		batch = append(batch, rlp_bytes...)
+		batch = append(batch, rlpBytes...)
 	}
 
 	return batch, nil

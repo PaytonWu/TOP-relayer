@@ -6,6 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"math/big"
 	"strconv"
+	"toprelayer/relayer/toprelayer/parlia"
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -17,6 +18,8 @@ import (
 	primitives "github.com/prysmaticlabs/prysm/v4/consensus-types/primitives"
 	eth "github.com/prysmaticlabs/prysm/v4/proto/prysm/v1alpha1"
 )
+
+const ()
 
 type ExtendedBeaconBlockHeader struct {
 	Header             *beaconrpc.BeaconBlockHeader
@@ -308,49 +311,52 @@ func getHecoInitDataWithHeight(url, h string) ([]byte, error) {
 }
 
 func getBscInitData(url string) ([]byte, error) {
-	ethsdk, err := ethclient.Dial(url)
+	ethClient, err := ethclient.Dial(url)
 	if err != nil {
-		logger.Error("getBscOrHecoInitDataWithHeight ethsdk create error:", err)
+		logger.Error("getBscInitData create error:", err)
 		return nil, err
 	}
-	height, err := ethsdk.BlockNumber(context.Background())
+	lastHeight, err := ethClient.BlockNumber(context.Background())
 	if err != nil {
-		logger.Error("getBscOrHecoInitDataWithHeight BlockNumber error:", err)
+		logger.Error("getBscInitData BlockNumber error:", err)
 		return nil, err
 	}
 
-	height = (height - 11) / 200 * 200
+	limit := parlia.ValidatorNum / 2
+	// make sure to find the epoch that has the authority data that can be used to verify the header.
+	effectiveEpochHeight := (lastHeight - (limit + 1)) / parlia.Epoch * parlia.Epoch
 
-	if height <= 200 {
+	if effectiveEpochHeight < parlia.Epoch {
 		logger.Error("param error")
 		return nil, nil
 	}
+	preEffectiveEpochHeight := effectiveEpochHeight - parlia.Epoch
 
-	logger.Info("init with height: %v - %v", height, height+11)
+	logger.Info("init with height: %v - %v", effectiveEpochHeight, effectiveEpochHeight+(limit+1))
 	var batch []byte
-	header, err := ethsdk.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(height-200))
+	preEffectiveEpochHeader, err := ethClient.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(preEffectiveEpochHeight))
 	if err != nil {
-		logger.Error("getBscOrHecoInitDataWithHeight HeaderByNumber error:", err)
+		logger.Error("getBscInitData HeaderByNumber error:", err)
 		return nil, err
 	}
-	rlp_bytes, err := rlp.EncodeToBytes(header)
+	headerBytes, err := rlp.EncodeToBytes(preEffectiveEpochHeader)
 	if err != nil {
-		logger.Error("getBscOrHecoInitDataWithHeight EncodeToBytes error:", err)
+		logger.Error("getBscInitData EncodeToBytes error:", err)
 		return nil, err
 	}
-	batch = append(batch, rlp_bytes...)
-	for i := height; i <= height+11; i++ {
-		header, err := ethsdk.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(i))
+	batch = append(batch, headerBytes...)
+	for i := effectiveEpochHeight; i <= effectiveEpochHeight+limit+1; i++ {
+		header, err := ethClient.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(i))
 		if err != nil {
-			logger.Error("getBscOrHecoInitDataWithHeight HeaderByNumber error:", err)
+			logger.Error("getBscInitData HeaderByNumber error:", err)
 			return nil, err
 		}
-		rlp_bytes, err := rlp.EncodeToBytes(header)
+		rlpBytes, err := rlp.EncodeToBytes(header)
 		if err != nil {
-			logger.Error("getBscOrHecoInitDataWithHeight EncodeToBytes error:", err)
+			logger.Error("getBscInitData EncodeToBytes error:", err)
 			return nil, err
 		}
-		batch = append(batch, rlp_bytes...)
+		batch = append(batch, rlpBytes...)
 	}
 
 	return batch, nil

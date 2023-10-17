@@ -19,11 +19,11 @@ package parlia
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
 	"math/big"
 	"sort"
 
@@ -65,7 +65,6 @@ func newSnapshot(
 	sigCache *lru.ARCCache,
 	number uint64,
 	hash common.Hash,
-	lastValidators []common.Address,
 	validators []common.Address,
 	voteAddrs []BLSPublicKey,
 ) *Snapshot {
@@ -181,13 +180,9 @@ func (s *Snapshot) isMajorityFork(forkHash string) bool {
 	return ally > len(s.RecentForkHashes)/2
 }
 
-func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *params.ChainConfig, parliaConfig *params.ParliaConfig) {
-	if !chainConfig.IsLuban(header.Number) {
-		return
-	}
-
+func (s *Snapshot) updateAttestation(header *types.Header) {
 	// The attestation should have been checked in verify header, update directly
-	attestation, _ := getVoteAttestationFromHeader(header, chainConfig, parliaConfig)
+	attestation, _ := getVoteAttestationFromHeader(header)
 	if attestation == nil {
 		return
 	}
@@ -199,7 +194,7 @@ func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *params.C
 	if targetHash != header.ParentHash || targetNumber+1 != header.Number.Uint64() {
 		log.Warn("updateAttestation failed", "error", fmt.Errorf("invalid attestation, target mismatch, expected block: %d, hash: %s; real block: %d, hash: %s",
 			header.Number.Uint64()-1, header.ParentHash, targetNumber, targetHash))
-		updateAttestationErrorCounter.Inc(1)
+		//updateAttestationErrorCounter.Inc(1)
 		return
 	}
 
@@ -237,6 +232,9 @@ func (s *Snapshot) apply(headers []*types.Header, chainId *big.Int) (*Snapshot, 
 	if headers[0].Number.Uint64() != s.Number+1 {
 		return nil, errOutOfRangeChain
 	}
+	if !bytes.Equal(headers[0].ParentHash.Bytes(), s.Hash.Bytes()) {
+		return nil, errBlockHashInconsistent
+	}
 	// Iterate through the headers and create a new snapshot
 	snap := s.copy()
 
@@ -246,15 +244,21 @@ func (s *Snapshot) apply(headers []*types.Header, chainId *big.Int) (*Snapshot, 
 		if limit := uint64(len(snap.Validators)/2 + 1); number >= limit {
 			delete(snap.Recents, number-limit)
 		}
+		if limit := uint64(len(snap.Validators)); number >= limit {
+			delete(snap.RecentForkHashes, number-limit)
+		}
 		// Resolve the authorization key and check against signers
 		validator, err := ecrecover(header, s.sigCache, chainId)
 		if err != nil {
 			return nil, err
 		}
-		_, ok1 := snap.Validators[validator]
-		_, ok2 := snap.LastValidators[validator]
-		if !ok1 && !ok2 {
-			return nil, errUnauthorizedValidator
+		//_, ok := snap.Validators[validator]
+		//_, ok2 := snap.LastValidators[validator]
+		//if !ok1 && !ok2 {
+		//	return nil, errUnauthorizedValidator
+		//}
+		if _, ok := snap.Validators[validator]; !ok {
+			return nil, errUnauthorizedValidator(validator.String())
 		}
 		for _, recent := range snap.Recents {
 			if recent == validator {
@@ -263,21 +267,22 @@ func (s *Snapshot) apply(headers []*types.Header, chainId *big.Int) (*Snapshot, 
 		}
 		snap.Recents[number] = validator
 		// change validator set
-		if number > 0 && (number%Epoch == 0) {
+		if number > 0 && (number%Epoch == uint64(len(snap.Validators)/2)) {
 			checkpointHeader := header
 			if checkpointHeader == nil {
 				return nil, consensus.ErrUnknownAncestor
 			}
 
-			validatorBytes := checkpointHeader.Extra[extraVanity : len(checkpointHeader.Extra)-extraSeal]
 			// get validators from headers and use that for new validator set
-			newValArr, err := ParseValidators(validatorBytes)
+			newValArr, voteAddrs, err := parseValidators(checkpointHeader)
 			if err != nil {
 				return nil, err
 			}
-			newVals := make(map[common.Address]struct{}, len(newValArr))
-			for _, val := range newValArr {
-				newVals[val] = struct{}{}
+			newVals := make(map[common.Address]*ValidatorInfo, len(newValArr))
+			for idx, val := range newValArr {
+				newVals[val] = &ValidatorInfo{
+					VoteAddress: voteAddrs[idx],
+				}
 			}
 			oldLimit := len(snap.Validators)/2 + 1
 			newLimit := len(newVals)/2 + 1
@@ -286,9 +291,23 @@ func (s *Snapshot) apply(headers []*types.Header, chainId *big.Int) (*Snapshot, 
 					delete(snap.Recents, number-uint64(newLimit)-uint64(i))
 				}
 			}
-			snap.LastValidators = snap.Validators
+			oldLimit = len(snap.Validators)
+			newLimit = len(newVals)
+			if newLimit < oldLimit {
+				for i := 0; i < oldLimit-newLimit; i++ {
+					delete(snap.RecentForkHashes, number-uint64(newLimit)-uint64(i))
+				}
+			}
 			snap.Validators = newVals
+			validators := snap.validators()
+			for idx, val := range validators {
+				snap.Validators[val].Index = idx + 1 // offset by 1
+			}
 		}
+
+		snap.updateAttestation(header)
+
+		snap.RecentForkHashes[number] = hex.EncodeToString(header.Extra[extraVanity-nextForkHashSize : extraVanity])
 	}
 	snap.Number += uint64(len(headers))
 	snap.Hash = headers[len(headers)-1].Hash()
@@ -346,10 +365,10 @@ func encodeSnapshot(header *types.Header, snap *Snapshot) ([]byte, error) {
 	for k := range snap.Validators {
 		out.Validators = append(out.Validators, k.Bytes())
 	}
-	out.LastValidatorsNum = uint64(len(snap.LastValidators))
-	for k := range snap.LastValidators {
-		out.LastValidators = append(out.LastValidators, k.Bytes())
-	}
+	//out.LastValidatorsNum = uint64(len(snap.LastValidators))
+	//for k := range snap.LastValidators {
+	//	out.LastValidators = append(out.LastValidators, k.Bytes())
+	//}
 	out.RecentsNum = uint64(len(snap.Recents))
 	for k, v := range snap.Recents {
 		var buf = make([]byte, 8)

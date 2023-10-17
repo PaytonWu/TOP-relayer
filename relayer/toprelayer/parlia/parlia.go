@@ -61,8 +61,12 @@ var (
 	// be modified via out-of-range or non-contiguous headers.
 	errOutOfRangeChain = errors.New("out of range or non-contiguous chain")
 
+	errBlockHashInconsistent = errors.New("the block hash is inconsistent")
+
 	// errUnauthorizedValidator is returned if a header is signed by a non-authorized entity.
-	errUnauthorizedValidator = errors.New("unauthorized validator")
+	errUnauthorizedValidator = func(val string) error {
+		return errors.New("unauthorized validator: " + val)
+	}
 
 	// errRecentlySigned is returned if a header is signed by an authorized entity
 	// that already signed a header recently, thus is temporarily not allowed to.
@@ -151,27 +155,23 @@ func (c *Parlia) Init(height uint64) error {
 	logger.Info("initialing congress snapshot from %v to %v", baseEpochHeight, height)
 	// init baseheight
 	{
-		preEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight-Epoch))
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
+		//preEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight-Epoch))
+		//if err != nil {
+		//	logger.Error(err)
+		//	return err
+		//}
 		baseEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight))
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
 		hash := baseEpochHeader.Hash()
-		validatorBytes := getValidatorBytesFromHeader(baseEpochHeader)
-		lastValidators := make([]common.Address, (len(preEpochHeader.Extra)-extraVanity-extraSeal)/common.AddressLength)
-		for i := 0; i < len(lastValidators); i++ {
-			copy(lastValidators[i][:], preEpochHeader.Extra[extraVanity+i*common.AddressLength:])
+		validators, voteAddrs, err := parseValidators(baseEpochHeader)
+		if err != nil {
+			logger.Error(err)
+			return err
 		}
-		validators := make([]common.Address, (len(baseEpochHeader.Extra)-extraVanity-extraSeal)/common.AddressLength)
-		for i := 0; i < len(validators); i++ {
-			copy(validators[i][:], baseEpochHeader.Extra[extraVanity+i*common.AddressLength:])
-		}
-		snap := newSnapshot(c.signatures, baseEpochHeight, hash, lastValidators, validators)
+		snap := newSnapshot(c.signatures, baseEpochHeight, hash, validators, voteAddrs)
 		c.recentSnaps.Add(snap.Hash, snap)
 	}
 
@@ -230,15 +230,12 @@ func (c *Parlia) GetLastSnap(number uint64, hash common.Hash) (*Snapshot, error)
 				return nil, fmt.Errorf("header is nil")
 			}
 			hash := checkpoint.Hash()
-			lastValidators := make([]common.Address, (len(lastCheckpoint.Extra)-extraVanity-extraSeal)/common.AddressLength)
-			for i := 0; i < len(lastValidators); i++ {
-				copy(lastValidators[i][:], lastCheckpoint.Extra[extraVanity+i*common.AddressLength:])
+			validators, voteAddrs, err := parseValidators(checkpoint)
+			if err != nil {
+				logger.Error(err)
+				return nil, err
 			}
-			validators := make([]common.Address, (len(checkpoint.Extra)-extraVanity-extraSeal)/common.AddressLength)
-			for i := 0; i < len(validators); i++ {
-				copy(validators[i][:], checkpoint.Extra[extraVanity+i*common.AddressLength:])
-			}
-			snap = newSnapshot(c.signatures, number, hash, lastValidators, validators)
+			snap = newSnapshot(c.signatures, number, hash, validators, voteAddrs)
 			// TODO:db
 			break
 		}
@@ -304,7 +301,7 @@ func getValidatorBytesFromHeader(header *types.Header) []byte {
 		return nil
 	}
 
-	// only supports Luban hard fork
+	// We made changes here, only supports Luban hard fork.
 
 	if header.Number.Uint64()%Epoch != 0 {
 		return nil
@@ -316,6 +313,34 @@ func getValidatorBytesFromHeader(header *types.Header) []byte {
 	start := extraVanity + validatorNumberSize
 	end := start + num*validatorBytesLength
 	return header.Extra[start:end]
+}
+
+// getVoteAttestationFromHeader returns the vote attestation extracted from the header's extra field if exists.
+func getVoteAttestationFromHeader(header *types.Header) (*VoteAttestation, error) {
+	if len(header.Extra) <= extraVanity+extraSeal {
+		return nil, nil
+	}
+
+	// We made changes here, only supports Luban hard fork.
+
+	var attestationBytes []byte
+	if header.Number.Uint64()%Epoch != 0 {
+		attestationBytes = header.Extra[extraVanity : len(header.Extra)-extraSeal]
+	} else {
+		num := int(header.Extra[extraVanity])
+		if len(header.Extra) <= extraVanity+extraSeal+validatorNumberSize+num*validatorBytesLength {
+			return nil, nil
+		}
+		start := extraVanity + validatorNumberSize + num*validatorBytesLength
+		end := len(header.Extra) - extraSeal
+		attestationBytes = header.Extra[start:end]
+	}
+
+	var attestation VoteAttestation
+	if err := rlp.Decode(bytes.NewReader(attestationBytes), &attestation); err != nil {
+		return nil, fmt.Errorf("block %d has vote attestation info, decode err: %s", header.Number.Uint64(), err)
+	}
+	return &attestation, nil
 }
 
 // ===========================     utility function        ==========================
