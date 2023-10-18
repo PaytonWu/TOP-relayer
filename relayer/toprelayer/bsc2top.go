@@ -178,7 +178,7 @@ func (et *Bsc2TopRelayer) StartRelayer(wg *sync.WaitGroup) error {
 					delay = time.Duration(ERRDELAY)
 					break
 				}
-				logger.Info("Bsc2TopRelayer check dest top Height:", destHeight)
+				logger.Info("Bsc2TopRelayer check dest TOP Height:", destHeight)
 				if destHeight == 0 {
 					if set := timeout.Reset(timeoutDuration); !set {
 						logger.Error("Bsc2TopRelayer reset timeout falied!")
@@ -195,7 +195,7 @@ func (et *Bsc2TopRelayer) StartRelayer(wg *sync.WaitGroup) error {
 					delay = time.Duration(ERRDELAY)
 					break
 				}
-				logger.Info("Bsc2TopRelayer check src eth Height:", srcHeight)
+				logger.Info("Bsc2TopRelayer check src BSC Height:", srcHeight)
 
 				if destHeight+1+CONFIRM_NUM > srcHeight {
 					if set := timeout.Reset(timeoutDuration); !set {
@@ -203,7 +203,7 @@ func (et *Bsc2TopRelayer) StartRelayer(wg *sync.WaitGroup) error {
 						delay = time.Duration(ERRDELAY)
 						break
 					}
-					logger.Debug("Bsc2TopRelayer waiting src eth update, delay")
+					logger.Debug("Bsc2TopRelayer waiting src BSC update, delay")
 					delay = time.Duration(WAITDELAY)
 					break
 				}

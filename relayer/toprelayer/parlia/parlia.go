@@ -71,6 +71,9 @@ var (
 	// errRecentlySigned is returned if a header is signed by an authorized entity
 	// that already signed a header recently, thus is temporarily not allowed to.
 	errRecentlySigned = errors.New("recently signed")
+
+	// errInvalidInitHeight is returned if the init height is too small
+	errInvalidInitHeight = errors.New("invalid init height")
 )
 
 // ecrecover extracts the Ethereum account address from a signed header.
@@ -141,41 +144,42 @@ func New(client *ethclient.Client) *Parlia {
 }
 
 func (c *Parlia) Init(height uint64) error {
-	var baseEpochHeight uint64
-	if height < Epoch {
-		baseEpochHeight = 0
-	} else {
-		if height%Epoch >= ValidatorNum {
-			baseEpochHeight = height / Epoch * Epoch
-		} else {
-			baseEpochHeight = (height/Epoch - 1) * Epoch
-		}
+	if height <= 4*Epoch {
+		logger.Error("init height is too small: %v", height)
+		return errInvalidInitHeight
 	}
 
-	logger.Info("initialing congress snapshot from %v to %v", baseEpochHeight, height)
-	// init baseheight
+	var endEpochHeight uint64 = 0
+	if height%Epoch <= ValidatorNum/2 {
+		endEpochHeight = height - height%Epoch - Epoch
+	} else {
+		endEpochHeight = height - height%Epoch
+	}
+	beginEpochHeight := endEpochHeight - Epoch
+
+	logger.Info("initialing congress snapshot from %v to %v", endEpochHeight, height)
 	{
-		//preEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight-Epoch))
-		//if err != nil {
-		//	logger.Error(err)
-		//	return err
-		//}
-		baseEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(baseEpochHeight))
+		beginEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(beginEpochHeight))
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
-		hash := baseEpochHeader.Hash()
-		validators, voteAddrs, err := parseValidators(baseEpochHeader)
+		endEpochHeader, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(endEpochHeight))
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
-		snap := newSnapshot(c.signatures, baseEpochHeight, hash, validators, voteAddrs)
+
+		validators, voteAddrs, err := parseValidators(beginEpochHeader)
+		if err != nil {
+			logger.Error(err)
+			return err
+		}
+		snap := newSnapshot(c.signatures, endEpochHeight, endEpochHeader.Hash(), validators, voteAddrs)
 		c.recentSnaps.Add(snap.Hash, snap)
 	}
 
-	for i := baseEpochHeight + 1; i <= height; i++ {
+	for i := endEpochHeight + 1; i <= height; i++ {
 		header, err := c.client.HeaderByNumber(context.Background(), big.NewInt(0).SetUint64(i))
 		if err != nil {
 			logger.Error(err)
