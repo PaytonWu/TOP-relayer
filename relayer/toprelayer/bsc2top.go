@@ -151,13 +151,13 @@ func (et *Bsc2TopRelayer) StartRelayer(wg *sync.WaitGroup) error {
 				time.Sleep(time.Second * time.Duration(ERRDELAY))
 				continue
 			}
-			logger.Info("Bsc2TopRelayer check dest top Height:", destHeight)
+			logger.Info("Bsc2TopRelayer check dest TOP Height:", destHeight)
 			if destHeight != 0 {
 				err = et.parlia.Init(destHeight)
 				if err == nil {
 					break
 				} else {
-					logger.Error("Bsc2TopRelayer parlia init error:", err)
+					logger.Error("Bsc2TopRelayer BSC init error:", err)
 				}
 			} else {
 				logger.Info("Bsc2TopRelayer not init yet")
